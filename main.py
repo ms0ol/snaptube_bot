@@ -64,6 +64,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 SESSION_TTL = 3600
 
 _SESSIONS: dict[str, dict] = {}
+_IG_COOKIES: dict[int, str] = {}  # user_id -> sessionid cookie
 
 PLATFORM_INFO = {
     "youtube":   {"name": "يوتيوب",   "icon": "▶️", "supports_audio": True},
@@ -102,8 +103,23 @@ def detect_platform(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def get_video_info(url: str) -> dict | None:
-    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+def _make_ig_cookies_file(sessionid: str) -> str:
+    """Write an Instagram sessionid to a Netscape cookies file and return its path."""
+    content = (
+        "# Netscape HTTP Cookie File\n"
+        ".instagram.com\tTRUE\t/\tTRUE\t2999999999\tsessionid\t" + sessionid + "\n"
+        ".instagram.com\tTRUE\t/\tFALSE\t2999999999\tds_user_id\t0\n"
+    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    tmp.write(content)
+    tmp.close()
+    return tmp.name
+
+
+def get_video_info(url: str, cookies_file: str | None = None) -> dict | None:
+    ydl_opts: dict = {"quiet": True, "no_warnings": True, "skip_download": True}
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
@@ -116,7 +132,7 @@ def get_tiktok_info(url: str) -> dict | None:
     try:
         r = httpx.post(
             TIKWM_API,
-            data={"url": url, "hd": "1"},
+            data={"url": url},
             timeout=20,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
@@ -137,7 +153,6 @@ def get_pinterest_info(url: str) -> dict | None:
     except yt_dlp.utils.DownloadError as e:
         err_str = str(e)
         if "No video formats found" in err_str or "no video formats" in err_str.lower():
-            # yt-dlp includes pin ID in error: "[Pinterest] PIN_ID: No video..."
             pin_id = _extract_pin_id_from_error(err_str) or _extract_pinterest_pin_id(url)
             if pin_id:
                 return _get_pinterest_image(pin_id)
@@ -233,11 +248,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📌 المنصات المدعومة:\n"
         "▶️ يوتيوب — فيديو حتى 1080p أو MP3\n"
         "🎵 تيك توك — بدون علامة مائية\n"
-        "📸 إنستقرام — ريلز وفيديوهات\n"
+        "📸 إنستقرام — ريلز وفيديوهات (يحتاج ربط حساب)\n"
         "📌 بينترست — فيديوهات وصور\n\n"
+        "📸 لتفعيل إنستقرام:\n"
+        "أرسل /setcookie ثم sessionid الخاص بك\n\n"
         "💡 فقط أرسل الرابط وسأتولى الباقي!"
     )
     await update.message.reply_text(welcome)
+
+
+async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setcookie command for Instagram session."""
+    args = context.args
+    user_id = update.message.from_user.id
+
+    if not args:
+        await update.message.reply_text(
+            "📸 *ربط حساب إنستقرام*\n\n"
+            "للتحميل من إنستقرام تحتاج إلى توفير `sessionid` من متصفحك\\.\n\n"
+            "*خطوات الحصول على sessionid:*\n"
+            "1\\. افتح instagram\\.com في المتصفح\n"
+            "2\\. اضغط F12 \\(أدوات المطور\\)\n"
+            "3\\. اذهب إلى Application ← Cookies\n"
+            "4\\. ابحث عن `sessionid` وانسخ قيمته\n\n"
+            "ثم أرسل:\n"
+            "`/setcookie قيمة_sessionid`",
+            parse_mode="MarkdownV2"
+        )
+        return
+
+    sessionid = args[0].strip()
+    if len(sessionid) < 20:
+        await update.message.reply_text("❌ قيمة sessionid غير صحيحة. تأكد من نسخها كاملة.")
+        return
+
+    _IG_COOKIES[user_id] = sessionid
+    await update.message.reply_text(
+        "✅ تم ربط حساب إنستقرام بنجاح!\n"
+        "يمكنك الآن إرسال روابط إنستقرام للتحميل."
+    )
+    logger.info(f"User {user_id} set Instagram cookie (sessionid length: {len(sessionid)})")
+
+
+async def removecookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /removecookie command."""
+    user_id = update.message.from_user.id
+    if user_id in _IG_COOKIES:
+        del _IG_COOKIES[user_id]
+        await update.message.reply_text("✅ تم حذف بيانات حساب إنستقرام.")
+    else:
+        await update.message.reply_text("ℹ️ لا يوجد حساب إنستقرام مرتبط.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -256,6 +316,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     pinfo = PLATFORM_INFO[platform]
+    user_id = update.message.from_user.id
     await update.message.reply_text(f"⏳ جاري جلب معلومات {pinfo['icon']} {pinfo['name']}...")
 
     loop = asyncio.get_running_loop()
@@ -284,16 +345,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         session_data = {"url": url, "title": title, "platform": platform, "pin_info": pin_info}
 
     elif platform == "instagram":
-        info = await loop.run_in_executor(None, get_video_info, url)
+        sessionid = _IG_COOKIES.get(user_id)
+        if not sessionid:
+            await update.message.reply_text(
+                "📸 إنستقرام يتطلب ربط حسابك أولاً.\n\n"
+                "أرسل /setcookie للاطلاع على الطريقة."
+            )
+            return
+
+        cookies_file = await loop.run_in_executor(None, _make_ig_cookies_file, sessionid)
+        try:
+            info = await loop.run_in_executor(None, get_video_info, url, cookies_file)
+        finally:
+            try:
+                os.unlink(cookies_file)
+            except Exception:
+                pass
+
         if not info:
             await update.message.reply_text(
-                "⚠️ إنستقرام يتطلب تسجيل الدخول لتحميل المحتوى من الخوادم.\n\n"
-                "💡 يمكنك تجربة روابط تيك توك أو يوتيوب أو بينترست."
+                "❌ تعذّر جلب الفيديو من إنستقرام.\n\n"
+                "تأكد من صحة sessionid وأن الرابط عام.\n"
+                "أرسل /setcookie لتحديث بياناتك."
             )
             return
         title = info.get("title", "إنستقرام")
         duration = info.get("duration", 0)
-        session_data = {"url": url, "title": title, "platform": platform}
+        session_data = {"url": url, "title": title, "platform": platform, "ig_sessionid": sessionid}
 
     else:
         info = await loop.run_in_executor(None, get_video_info, url)
@@ -306,7 +384,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     _cleanup_sessions()
     session_id = str(uuid.uuid4())
-    user_id = update.message.from_user.id
     session_data.update({"ts": time.time(), "user_id": user_id, "chat_id": update.message.chat_id})
     _SESSIONS[session_id] = session_data
 
@@ -369,6 +446,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await _send_tiktok(query, context, session)
         elif platform == "pinterest":
             await _send_pinterest(query, context, session)
+        elif platform == "instagram":
+            await _download_video(query, context, url, title, "instagram",
+                                  ig_sessionid=session.get("ig_sessionid"))
         else:
             await _download_video(query, context, url, title, platform)
     elif action == "audio":
@@ -383,31 +463,42 @@ async def _send_tiktok(query, context, session: dict) -> None:
     tk_data = session.get("tiktok_data", {})
     await query.edit_message_text("⏳ جاري تحميل فيديو تيك توك بدون علامة مائية...")
 
-    video_url = tk_data.get("hdplay") or tk_data.get("play")
+    # Use `play` (H.264/compatible) NOT `hdplay` (may be H.265 which Telegram can't show inline)
+    video_url = tk_data.get("play")
     if not video_url:
         await query.edit_message_text("❌ تعذّر الحصول على رابط الفيديو.")
         return
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        video_path = Path(tmpdir) / "tiktok.mp4"
+        raw_path = Path(tmpdir) / "tiktok_raw.mp4"
+        final_path = Path(tmpdir) / "tiktok.mp4"
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _download_url_to_file, video_url, str(video_path))
+            await loop.run_in_executor(None, _download_url_to_file, video_url, str(raw_path))
         except Exception as e:
             logger.error(f"TikTok download error: {e}")
             await query.edit_message_text("❌ حدث خطأ أثناء التحميل.")
             return
 
-        file_size = video_path.stat().st_size
+        file_size = raw_path.stat().st_size
         if file_size > MAX_FILE_SIZE:
             await query.edit_message_text(
                 f"⚠️ حجم الفيديو ({file_size // (1024*1024)} ميجابايت) يتجاوز الحد (50 ميجابايت)."
             )
             return
 
+        # Re-encode to H.264 baseline to guarantee Telegram compatibility
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _reencode_h264, str(raw_path), str(final_path))
+            send_path = final_path if final_path.exists() and final_path.stat().st_size > 0 else raw_path
+        except Exception as e:
+            logger.warning(f"Re-encode failed, using raw: {e}")
+            send_path = raw_path
+
         try:
             await query.edit_message_text("📤 جاري إرسال الفيديو...")
-            with open(video_path, "rb") as f:
+            with open(send_path, "rb") as f:
                 await context.bot.send_video(
                     chat_id=query.message.chat_id,
                     video=f,
@@ -418,6 +509,24 @@ async def _send_tiktok(query, context, session: dict) -> None:
         except Exception as e:
             logger.error(f"TikTok send error: {e}")
             await query.edit_message_text("❌ حدث خطأ أثناء إرسال الفيديو.")
+
+
+def _reencode_h264(input_path: str, output_path: str) -> None:
+    """Re-encode video to H.264 for maximum Telegram compatibility."""
+    import subprocess
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", input_path,
+            "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.0",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path
+        ],
+        capture_output=True, timeout=120
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()[:200]}")
 
 
 async def _send_pinterest(query, context, session: dict) -> None:
@@ -516,13 +625,16 @@ def _download_url_to_file(url: str, path: str) -> None:
                 f.write(chunk)
 
 
-def _build_video_opts(platform: str, output_template: str) -> dict:
-    base = {
+def _build_video_opts(platform: str, output_template: str, cookies_file: str | None = None) -> dict:
+    base: dict = {
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
     }
+    if cookies_file:
+        base["cookiefile"] = cookies_file
+
     if platform == "instagram":
         base["format"] = "bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best"
     elif platform == "pinterest":
@@ -537,14 +649,19 @@ def _build_video_opts(platform: str, output_template: str) -> dict:
     return base
 
 
-async def _download_video(query, context, url: str, title: str, platform: str) -> None:
+async def _download_video(query, context, url: str, title: str, platform: str,
+                          ig_sessionid: str | None = None) -> None:
     pinfo = PLATFORM_INFO.get(platform, PLATFORM_INFO["youtube"])
     await query.edit_message_text(f"⏳ جاري تحميل الفيديو {pinfo['icon']} {pinfo['name']}...")
     await context.bot.send_chat_action(chat_id=query.message.chat_id, action="upload_video")
 
+    cookies_file: str | None = None
+    if ig_sessionid:
+        cookies_file = _make_ig_cookies_file(ig_sessionid)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         output_template = os.path.join(tmpdir, "%(title)s.%(ext)s")
-        ydl_opts = _build_video_opts(platform, output_template)
+        ydl_opts = _build_video_opts(platform, output_template, cookies_file)
         try:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: _run_ydl(ydl_opts, url))
@@ -552,6 +669,12 @@ async def _download_video(query, context, url: str, title: str, platform: str) -
             logger.error(f"Video download error ({platform}): {e}")
             await query.edit_message_text("❌ حدث خطأ أثناء التحميل. حاول مجدداً.")
             return
+        finally:
+            if cookies_file:
+                try:
+                    os.unlink(cookies_file)
+                except Exception:
+                    pass
 
         all_files = [f for f in Path(tmpdir).glob("*") if f.is_file()]
         if not all_files:
@@ -652,6 +775,8 @@ def main() -> None:
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setcookie", setcookie_command))
+    app.add_handler(CommandHandler("removecookie", removecookie_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_handler))
 
