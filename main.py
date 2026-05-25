@@ -780,8 +780,33 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Bot started. Polling for updates...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    is_production = os.environ.get("REPLIT_DEPLOYMENT") == "1"
+
+    if is_production:
+        # In production: use webhook so polling doesn't conflict with dev environment
+        domain = (
+            os.environ.get("REPLIT_DOMAINS", "")
+            or os.environ.get("REPLIT_DEV_DOMAIN", "")
+        )
+        if not domain:
+            raise RuntimeError("Cannot determine deployment domain for webhook. Set REPLIT_DOMAINS.")
+
+        # Use first domain if multiple are listed (comma-separated)
+        domain = domain.split(",")[0].strip()
+        webhook_path = f"/webhook/{token}"
+        webhook_url = f"https://{domain}{webhook_path}"
+
+        logger.info(f"Production mode: starting webhook on {webhook_url}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=8080,
+            url_path=webhook_path,
+            webhook_url=webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        logger.info("Development mode: starting polling...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
