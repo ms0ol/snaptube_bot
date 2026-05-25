@@ -783,20 +783,18 @@ def main() -> None:
     is_production = os.environ.get("REPLIT_DEPLOYMENT") == "1"
 
     if is_production:
-        # In production: use webhook so polling doesn't conflict with dev environment
         domain = (
-            os.environ.get("REPLIT_DOMAINS", "")
+            os.environ.get("REPLIT_DOMAINS", "").split(",")[0].strip()
             or os.environ.get("REPLIT_DEV_DOMAIN", "")
         )
-        if not domain:
-            raise RuntimeError("Cannot determine deployment domain for webhook. Set REPLIT_DOMAINS.")
+    else:
+        domain = os.environ.get("REPLIT_DEV_DOMAIN", "")
 
-        # Use first domain if multiple are listed (comma-separated)
-        domain = domain.split(",")[0].strip()
+    if domain:
         webhook_path = f"/webhook/{token}"
         webhook_url = f"https://{domain}{webhook_path}"
-
-        logger.info(f"Production mode: starting webhook on {webhook_url}")
+        mode_label = "Production" if is_production else "Development"
+        logger.info(f"{mode_label} webhook mode: {webhook_url}")
         app.run_webhook(
             listen="0.0.0.0",
             port=8080,
@@ -805,7 +803,7 @@ def main() -> None:
             allowed_updates=Update.ALL_TYPES,
         )
     else:
-        logger.info("Development mode: starting polling...")
+        logger.info("No Replit domain found — falling back to polling (local dev)")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
