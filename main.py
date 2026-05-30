@@ -403,6 +403,44 @@ def _reencode_h264(input_path: str, output_path: str) -> None:
         raise RuntimeError(f"ffmpeg: {result.stderr.decode()[:300]}")
 
 
+def _extract_mp3(video_path: str, output_path: str) -> None:
+    """استخراج صوت MP3 من ملف الفيديو."""
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", video_path,
+            "-vn",
+            "-c:a", "libmp3lame", "-q:a", "2",
+            output_path,
+        ],
+        capture_output=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg audio: {result.stderr.decode()[:200]}")
+
+
+async def _send_extracted_audio(context, chat_id: int, video_path: str,
+                                 title: str, icon: str, loop) -> None:
+    """يستخرج MP3 من الفيديو ويرسله، ولا يوقف العملية عند الخطأ."""
+    try:
+        audio_path = str(video_path).rsplit(".", 1)[0] + "_audio.mp3"
+        await loop.run_in_executor(None, _extract_mp3, str(video_path), audio_path)
+        audio_file = Path(audio_path)
+        if not audio_file.exists() or audio_file.stat().st_size == 0:
+            return
+        if audio_file.stat().st_size > MAX_FILE_SIZE:
+            return
+        with open(audio_path, "rb") as f:
+            await context.bot.send_audio(
+                chat_id=chat_id,
+                audio=f,
+                title=title,
+                caption=f"🎵 {title}",
+            )
+    except Exception as e:
+        logger.warning(f"Auto audio extraction failed (non-critical): {e}")
+
+
 # ── تيك توك ───────────────────────────────────────────────────────────────────
 async def _send_tiktok(query, context, session: dict) -> None:
     pinfo   = PLATFORM_INFO["tiktok"]
@@ -455,6 +493,9 @@ async def _send_tiktok(query, context, session: dict) -> None:
                         supports_streaming=True,
                     )
                 await query.delete_message()
+                await _send_extracted_audio(
+                    context, query.message.chat_id, str(send_path), title, pinfo["icon"], loop
+                )
             except Exception as e:
                 logger.error(f"TikTok send error: {e}")
                 await query.edit_message_text("❌ حدث خطأ أثناء إرسال الفيديو.")
@@ -534,6 +575,9 @@ async def _download_video(query, context, url: str, title: str, platform: str) -
                         supports_streaming=True,
                     )
                 await query.delete_message()
+                await _send_extracted_audio(
+                    context, query.message.chat_id, str(video_file), title, pinfo["icon"], loop
+                )
             except Exception as e:
                 logger.error(f"Error sending video: {e}")
                 await query.edit_message_text("❌ حدث خطأ أثناء إرسال الفيديو.")
@@ -599,6 +643,11 @@ async def _send_pinterest(query, context, session: dict) -> None:
                                 supports_streaming=True,
                             )
                     await query.delete_message()
+                    if pin_type == "video_url":
+                        await _send_extracted_audio(
+                            context, query.message.chat_id, str(media_path),
+                            title, pinfo["icon"], loop
+                        )
                 except Exception as e:
                     logger.error(f"Pinterest send error: {e}")
                     await query.edit_message_text("❌ حدث خطأ أثناء الإرسال.")
