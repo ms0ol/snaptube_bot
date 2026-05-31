@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import re
 import asyncio
@@ -260,6 +261,202 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ── تحميل فوري: تيك توك ───────────────────────────────────────────────────────
+async def _inline_tiktok(update: Update, context, url: str,
+                          status_msg, stop: asyncio.Event, loop) -> None:
+    pinfo    = PLATFORM_INFO["tiktok"]
+    chat_id  = update.message.chat_id
+
+    info = await loop.run_in_executor(None, get_tiktok_info, url)
+    if not info:
+        await status_msg.edit_text("❌ تعذّر جلب الفيديو. تأكد من الرابط.")
+        return
+
+    title     = info.get("title", "تيك توك")
+    video_url = info.get("play") or ""
+    if not video_url:
+        await status_msg.edit_text("❌ لم يتم العثور على رابط الفيديو.")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path   = Path(tmpdir) / "raw.mp4"
+        final_path = Path(tmpdir) / "final.mp4"
+
+        try:
+            await loop.run_in_executor(None, _download_url_to_file, video_url, str(raw_path))
+        except Exception as e:
+            logger.error(f"TikTok inline download error: {e}")
+            await status_msg.edit_text("❌ حدث خطأ أثناء التحميل.")
+            return
+
+        if raw_path.stat().st_size > MAX_FILE_SIZE:
+            await status_msg.edit_text("⚠️ حجم الفيديو يتجاوز 50 ميجابايت.")
+            return
+
+        try:
+            await loop.run_in_executor(None, _reencode_h264, str(raw_path), str(final_path))
+            send_path = final_path if final_path.exists() and final_path.stat().st_size > 0 else raw_path
+        except Exception as e:
+            logger.warning(f"Re-encode failed: {e}")
+            send_path = raw_path
+
+        stop.set()
+        await status_msg.edit_text("📤 جاري الإرسال…")
+        try:
+            with open(send_path, "rb") as f:
+                await context.bot.send_video(
+                    chat_id=chat_id, video=f,
+                    caption=f"{pinfo['icon']} {title}",
+                    supports_streaming=True,
+                )
+            await status_msg.delete()
+            await _send_extracted_audio(context, chat_id, str(send_path), title, pinfo["icon"], loop)
+        except Exception as e:
+            logger.error(f"TikTok inline send error: {e}")
+            await status_msg.edit_text("❌ حدث خطأ أثناء الإرسال.")
+
+
+# ── تحميل فوري: yt-dlp (إنستقرام وبينترست فيديو) ─────────────────────────────
+async def _inline_ydl(update: Update, context, url: str, platform: str,
+                       status_msg, stop: asyncio.Event, loop) -> None:
+    pinfo        = PLATFORM_INFO[platform]
+    chat_id      = update.message.chat_id
+    cookies_file = None
+    if platform == "instagram":
+        cookies_file = _make_ig_cookies_file(IG_SESSIONID)
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_tmpl = str(Path(tmpdir) / "%(title)s.%(ext)s")
+            opts     = _build_video_opts(platform, out_tmpl, cookies_file)
+            opts["writeinfojson"] = True
+
+            try:
+                await loop.run_in_executor(None, lambda: _run_ydl(opts, url))
+            except Exception as e:
+                logger.error(f"Inline ydl error ({platform}): {e}")
+                await status_msg.edit_text("❌ حدث خطأ أثناء التحميل.")
+                return
+            finally:
+                if cookies_file:
+                    try:
+                        os.unlink(cookies_file)
+                        cookies_file = None
+                    except Exception:
+                        pass
+
+            # العنوان من ملف JSON
+            title = pinfo["name"]
+            for jf in Path(tmpdir).glob("*.info.json"):
+                try:
+                    data  = json.loads(jf.read_text())
+                    title = data.get("title") or data.get("id") or title
+                except Exception:
+                    pass
+                break
+
+            all_files = [f for f in Path(tmpdir).glob("*")
+                         if f.is_file() and f.suffix.lower() != ".json"]
+            if not all_files:
+                await status_msg.edit_text("❌ لم يتم العثور على الملف.")
+                return
+
+            mp4_files = [f for f in all_files if f.suffix.lower() == ".mp4"]
+            video_file = max(mp4_files or all_files, key=lambda f: f.stat().st_size)
+
+            if platform == "instagram":
+                final_path = Path(tmpdir) / "ig_final.mp4"
+                try:
+                    await loop.run_in_executor(None, _reencode_h264, str(video_file), str(final_path))
+                    if final_path.exists() and final_path.stat().st_size > 0:
+                        video_file = final_path
+                except Exception as e:
+                    logger.warning(f"IG re-encode failed: {e}")
+
+            if video_file.stat().st_size > MAX_FILE_SIZE:
+                await status_msg.edit_text(
+                    f"⚠️ حجم الفيديو ({video_file.stat().st_size // (1024*1024)} MB) يتجاوز الحد."
+                )
+                return
+
+            stop.set()
+            await status_msg.edit_text("📤 جاري الإرسال…")
+            with open(video_file, "rb") as f:
+                await context.bot.send_video(
+                    chat_id=chat_id, video=f,
+                    caption=f"{pinfo['icon']} {title}",
+                    supports_streaming=True,
+                )
+            await status_msg.delete()
+            await _send_extracted_audio(context, chat_id, str(video_file), title, pinfo["icon"], loop)
+    finally:
+        if cookies_file:
+            try:
+                os.unlink(cookies_file)
+            except Exception:
+                pass
+
+
+# ── تحميل فوري: بينترست ───────────────────────────────────────────────────────
+async def _inline_pinterest(update: Update, context, url: str,
+                             status_msg, stop: asyncio.Event, loop) -> None:
+    pinfo   = PLATFORM_INFO["pinterest"]
+    chat_id = update.message.chat_id
+
+    pin_info = await loop.run_in_executor(None, get_pinterest_info, url)
+    if not pin_info:
+        await status_msg.edit_text("❌ تعذّر جلب المحتوى.")
+        return
+
+    pin_type = pin_info.get("type")
+
+    if pin_type == "video":
+        title = pin_info["info"].get("title", "بينترست")
+        await _inline_ydl(update, context, url, "pinterest", status_msg, stop, loop)
+        return
+
+    if pin_type in ("image", "video_url"):
+        title     = pin_info.get("title", "بينترست")
+        media_url = pin_info["url"]
+        suffix    = ".mp4" if pin_type == "video_url" else ".jpg"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            media_path = Path(tmpdir) / f"pin{suffix}"
+            try:
+                await loop.run_in_executor(None, _download_url_to_file, media_url, str(media_path))
+            except Exception as e:
+                logger.error(f"Pinterest inline download error: {e}")
+                await status_msg.edit_text("❌ حدث خطأ أثناء التحميل.")
+                return
+
+            if media_path.stat().st_size > MAX_FILE_SIZE:
+                await status_msg.edit_text("⚠️ الملف يتجاوز 50 ميجابايت.")
+                return
+
+            stop.set()
+            await status_msg.edit_text("📤 جاري الإرسال…")
+            with open(media_path, "rb") as f:
+                if pin_type == "image":
+                    await context.bot.send_photo(
+                        chat_id=chat_id, photo=f,
+                        caption=f"{pinfo['icon']} {title}",
+                    )
+                else:
+                    await context.bot.send_video(
+                        chat_id=chat_id, video=f,
+                        caption=f"{pinfo['icon']} {title}",
+                        supports_streaming=True,
+                    )
+            await status_msg.delete()
+            if pin_type == "video_url":
+                await _send_extracted_audio(
+                    context, chat_id, str(media_path), title, pinfo["icon"], loop
+                )
+        return
+
+    await status_msg.edit_text("❌ تعذّر معالجة هذا المحتوى.")
+
+
 # ── استقبال الروابط ───────────────────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text or ""
@@ -272,83 +469,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    pinfo    = PLATFORM_INFO[platform]
-    user_id  = update.message.from_user.id
-
-    # رسالة واحدة تُعدَّل لاحقاً (لا ترسل رسالتين)
-    status_msg = await update.message.reply_text(
-        f"⏳ جاري جلب معلومات {pinfo['icon']} {pinfo['name']}…"
-    )
-
     loop = asyncio.get_running_loop()
 
-    # ── تيك توك ──────────────────────────────────────────────────────────────
-    if platform == "tiktok":
-        info = await loop.run_in_executor(None, get_tiktok_info, url)
-        if not info:
-            await status_msg.edit_text("❌ تعذّر جلب معلومات الفيديو. تأكد من صحة الرابط.")
-            return
-        title    = info.get("title", "تيك توك")
-        duration = info.get("duration", 0)
-        session_data = {"url": url, "title": title, "platform": platform, "tiktok_data": info}
-
-    # ── بينترست ──────────────────────────────────────────────────────────────
-    elif platform == "pinterest":
-        pin_info = await loop.run_in_executor(None, get_pinterest_info, url)
-        if not pin_info:
-            await status_msg.edit_text("❌ تعذّر جلب المحتوى. تأكد من صحة الرابط.")
-            return
-        if pin_info["type"] == "video":
-            title    = pin_info["info"].get("title", "بينترست")
-            duration = pin_info["info"].get("duration", 0)
-        else:
-            title    = pin_info.get("title", "بينترست")
-            duration = 0
-        session_data = {"url": url, "title": title, "platform": platform, "pin_info": pin_info}
-
-    # ── إنستقرام: عرض الزر فوراً بدون انتظار استخراج المعلومات ─────────────
-    elif platform == "instagram":
-        title    = "إنستقرام"
-        duration = 0
-        session_data = {"url": url, "title": title, "platform": platform}
-
-    # ── يوتيوب ───────────────────────────────────────────────────────────────
-    else:
-        info = await loop.run_in_executor(None, get_video_info, url)
-        if not info:
-            await status_msg.edit_text("❌ تعذّر جلب معلومات الفيديو. تأكد من صحة الرابط.")
-            return
-        title    = info.get("title", "يوتيوب")
-        duration = info.get("duration", 0)
-        session_data = {"url": url, "title": title, "platform": platform}
-
-    # ── بناء لوحة الأزرار ────────────────────────────────────────────────────
-    _cleanup_sessions()
-    session_id = str(uuid.uuid4())
-    session_data.update({"ts": time.time(), "user_id": user_id, "chat_id": update.message.chat_id})
-    _SESSIONS[session_id] = session_data
-
-    if pinfo["supports_audio"]:
+    # يوتيوب: عرض زرّي الاختيار فوراً بلا جلب معلومات
+    if platform == "youtube":
+        _cleanup_sessions()
+        sid = str(uuid.uuid4())
+        _SESSIONS[sid] = {
+            "url": url, "title": "يوتيوب", "platform": "youtube",
+            "ts": time.time(),
+            "user_id": update.message.from_user.id,
+            "chat_id": update.message.chat_id,
+        }
         keyboard = [[
-            InlineKeyboardButton("🎥 فيديو", callback_data=f"video:{session_id}"),
-            InlineKeyboardButton("🎵 MP3",   callback_data=f"audio:{session_id}"),
+            InlineKeyboardButton("🎥 فيديو", callback_data=f"video:{sid}"),
+            InlineKeyboardButton("🎵 MP3",   callback_data=f"audio:{sid}"),
         ]]
-    else:
-        keyboard = [[InlineKeyboardButton("⬇️ تحميل", callback_data=f"video:{session_id}")]]
+        await update.message.reply_text(
+            "▶️ يوتيوب — اختر نوع التحميل:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
 
-    duration_str = format_duration(duration) if duration else "—"
-    caption = (
-        f"{pinfo['icon']} *{escape_markdown(title)}*\n"
-        f"📡 المنصة: {escape_markdown(pinfo['name'])}\n"
-        f"⏱ المدة: {escape_markdown(duration_str)}\n\n"
-        "اختر نوع التحميل:"
-    )
-    # تعديل رسالة الانتظار الأولى بدل إرسال رسالة جديدة ← لا تكرار
-    await status_msg.edit_text(
-        caption,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="MarkdownV2",
-    )
+    # باقي المنصات: تحميل فوري بدون أزرار
+    status_msg = await update.message.reply_text("⏳ جاري التحميل…")
+    stop       = asyncio.Event()
+    spin_task  = asyncio.create_task(_spinner(status_msg, stop))
+    try:
+        if platform == "tiktok":
+            await _inline_tiktok(update, context, url, status_msg, stop, loop)
+        elif platform == "instagram":
+            await _inline_ydl(update, context, url, "instagram", status_msg, stop, loop)
+        elif platform == "pinterest":
+            await _inline_pinterest(update, context, url, status_msg, stop, loop)
+    finally:
+        stop.set()
+        spin_task.cancel()
 
 
 # ── معالج الأزرار ─────────────────────────────────────────────────────────────
@@ -528,6 +684,7 @@ async def _download_video(query, context, url: str, title: str, platform: str) -
         with tempfile.TemporaryDirectory() as tmpdir:
             output_template = os.path.join(tmpdir, "%(title)s.%(ext)s")
             ydl_opts = _build_video_opts(platform, output_template, cookies_file)
+            ydl_opts["writeinfojson"] = True
 
             loop = asyncio.get_running_loop()
             try:
@@ -544,14 +701,23 @@ async def _download_video(query, context, url: str, title: str, platform: str) -
                     except Exception:
                         pass
 
-            all_files = [f for f in Path(tmpdir).glob("*") if f.is_file()]
+            # العنوان الحقيقي من ملف JSON
+            for jf in Path(tmpdir).glob("*.info.json"):
+                try:
+                    data  = json.loads(jf.read_text())
+                    title = data.get("title") or data.get("id") or title
+                except Exception:
+                    pass
+                break
+
+            all_files = [f for f in Path(tmpdir).glob("*")
+                         if f.is_file() and f.suffix.lower() != ".json"]
             if not all_files:
                 await query.edit_message_text("❌ لم يتم العثور على الملف. حاول مجدداً.")
                 return
 
             mp4_files = [f for f in all_files if f.suffix.lower() == ".mp4"]
-            candidates = mp4_files if mp4_files else all_files
-            video_file = max(candidates, key=lambda f: f.stat().st_size)
+            video_file = max(mp4_files or all_files, key=lambda f: f.stat().st_size)
 
             # إنستقرام: إعادة ترميز H.264 لضمان ظهور الصورة في تيليجرام
             if platform == "instagram":
@@ -680,6 +846,7 @@ async def _download_audio(query, context, url: str, title: str) -> None:
                 "outtmpl": os.path.join(tmpdir, "%(title)s.%(ext)s"),
                 "quiet": True,
                 "no_warnings": True,
+                "writeinfojson": True,
                 "postprocessors": [{
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -694,12 +861,22 @@ async def _download_audio(query, context, url: str, title: str) -> None:
                 await query.edit_message_text("❌ حدث خطأ أثناء التحميل. حاول مجدداً.")
                 return
 
-            all_files = [f for f in Path(tmpdir).glob("*") if f.is_file()]
+            # العنوان الحقيقي من ملف JSON
+            for jf in Path(tmpdir).glob("*.info.json"):
+                try:
+                    data  = json.loads(jf.read_text())
+                    title = data.get("title") or data.get("id") or title
+                except Exception:
+                    pass
+                break
+
+            all_files = [f for f in Path(tmpdir).glob("*")
+                         if f.is_file() and f.suffix.lower() != ".json"]
             if not all_files:
                 await query.edit_message_text("❌ لم يتم العثور على الملف.")
                 return
 
-            mp3_files = [f for f in all_files if f.suffix.lower() == ".mp3"]
+            mp3_files  = [f for f in all_files if f.suffix.lower() == ".mp3"]
             audio_file = max(mp3_files or all_files, key=lambda f: f.stat().st_mtime)
 
             if audio_file.stat().st_size > MAX_FILE_SIZE:
