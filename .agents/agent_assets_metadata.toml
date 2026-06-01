@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "3K6mRjn2f8ni9Zt1V3jyi"
+uri = "file://REQUIREMENTS.md"
+type = "text"
+title = "متطلبات المشروع — REQUIREMENTS.md"
