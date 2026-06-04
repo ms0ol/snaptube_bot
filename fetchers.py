@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 def get_video_info(url: str, cookies_file: str | None = None) -> dict | None:
-    """يجلب معلومات الفيديو عبر yt-dlp بدون تحميل."""
     opts: dict = {"quiet": True, "no_warnings": True, "skip_download": True}
     if cookies_file:
         opts["cookiefile"] = cookies_file
@@ -24,7 +23,6 @@ def get_video_info(url: str, cookies_file: str | None = None) -> dict | None:
 
 
 def get_tiktok_info(url: str) -> dict | None:
-    """يجلب بيانات الفيديو من tikwm API."""
     try:
         r = httpx.post(
             TIKWM_API,
@@ -41,7 +39,6 @@ def get_tiktok_info(url: str) -> dict | None:
 
 
 def get_pinterest_info(url: str) -> dict | None:
-    """يجلب معلومات البين من بينترست (فيديو أو صورة)."""
     try:
         opts = {"quiet": True, "no_warnings": True, "skip_download": True}
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -60,13 +57,11 @@ def get_pinterest_info(url: str) -> dict | None:
 
 
 def _extract_pin_id_from_error(err: str) -> str | None:
-    """يستخرج معرّف البين من رسالة خطأ yt-dlp."""
     m = re.search(r"\[Pinterest\]\s+(\d+):", err)
     return m.group(1) if m else None
 
 
 def _extract_pinterest_pin_id(url: str) -> str | None:
-    """يستخرج معرّف البين من الرابط أو بعد تتبع التحويل."""
     m = re.search(r"/pin/(\d+)", url)
     if m:
         return m.group(1)
@@ -80,7 +75,6 @@ def _extract_pinterest_pin_id(url: str) -> str | None:
 
 
 def _get_pinterest_image(pin_id: str) -> dict | None:
-    """يجلب الصورة أو الفيديو من Pinterest Widgets API."""
     try:
         for attempt in range(3):
             r = httpx.get(

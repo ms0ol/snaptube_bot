@@ -10,17 +10,9 @@ from telegram.ext import (
     filters,
 )
 
-from handlers.commands   import start
+from handlers.commands    import start
 from handlers.url_handler import handle_message, button_handler
-from handlers.converters  import (
-    handle_voice,
-    handle_audio_to_voice,
-    handle_photo_to_sticker,
-    handle_sticker_to_photo,
-    handle_video_convert,
-    handle_video_note_convert,
-    handle_document_to_pdf,
-)
+from handlers.admin       import set_content_handler
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -36,21 +28,16 @@ def main() -> None:
 
     app = Application.builder().token(token).build()
 
-    # ── أوامر ─────────────────────────────────────────────────────────────────
+    # ── أوامر عامة ────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start))
+
+    # ── أوامر المطور ──────────────────────────────────────────────────────────
+    app.add_handler(CommandHandler("setContent_chroma", set_content_handler))
+    app.add_handler(CommandHandler("setContent_nature", set_content_handler))
 
     # ── روابط وأزرار ──────────────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_handler))
-
-    # ── محوّلات الوسائط ────────────────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.VOICE,        handle_voice))
-    app.add_handler(MessageHandler(filters.AUDIO,        handle_audio_to_voice))
-    app.add_handler(MessageHandler(filters.PHOTO,        handle_photo_to_sticker))
-    app.add_handler(MessageHandler(filters.Sticker.ALL,  handle_sticker_to_photo))
-    app.add_handler(MessageHandler(filters.VIDEO,        handle_video_convert))
-    app.add_handler(MessageHandler(filters.VIDEO_NOTE,   handle_video_note_convert))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document_to_pdf))
 
     # ── تشغيل البوت ───────────────────────────────────────────────────────────
     is_production = os.environ.get("REPLIT_DEPLOYMENT") == "1"

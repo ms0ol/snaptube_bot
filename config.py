@@ -5,15 +5,21 @@ import os
 MAX_FILE_SIZE = 50 * 1024 * 1024   # 50 MB
 SESSION_TTL   = 3600               # ساعة واحدة
 
+# ── بيانات Supabase ───────────────────────────────────────────────────────────
+SUPABASE_URL = "https://ocjytwphvzrhoxmmgujh.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9janl0d3BodnpyaG94bW1ndWpoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzY2MTUsImV4cCI6MjA5NTkxMjYxNX0.SPp__zCpFSIEE56oFItvFqJar2FxNF5e-t2HNJozNxs"
+
+# ── بيانات المطور والقنوات ────────────────────────────────────────────────────
+DEVELOPER_ID       = 8055247329
+CHROMA_CHANNEL_ID  = -1003978029981
+NATURE_CHANNEL_ID  = -1003904589422
+
 # ── روابط APIs ────────────────────────────────────────────────────────────────
 TIKWM_API             = "https://tikwm.com/api/"
 PINTEREST_WIDGETS_API = "https://widgets.pinterest.com/v3/pidgets/pins/info/?pin_ids={}"
 
 # ── sessionid إنستقرام الثابت ─────────────────────────────────────────────────
 IG_SESSIONID = "70097632584%3ATQuAgk17CobNm9%3A18%3AAYiMNf-GmQbcVFu0gr15HLSHWVgBK0vaViLsX6viuQ"
-
-# ── مسار LibreOffice ──────────────────────────────────────────────────────────
-SOFFICE = os.path.expanduser("~/.nix-profile/bin/soffice")
 
 # ── تعبيرات الكشف عن الروابط ─────────────────────────────────────────────────
 YOUTUBE_REGEX = re.compile(
@@ -53,6 +59,9 @@ WAIT_MSGS = [
 
 # ── جلسات المستخدمين (في الذاكرة) ────────────────────────────────────────────
 SESSIONS: dict[str, dict] = {}
+
+# ── مسار LibreOffice ──────────────────────────────────────────────────────────
+SOFFICE = os.path.expanduser("~/.nix-profile/bin/soffice")
 
 # ── أنواع الملفات المدعومة للتحويل إلى PDF ────────────────────────────────────
 PDF_SUPPORTED_MIME = {

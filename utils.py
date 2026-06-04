@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 def cleanup_sessions() -> None:
-    """يحذف الجلسات المنتهية الصلاحية من الذاكرة."""
     now     = time.time()
     expired = [sid for sid, s in SESSIONS.items() if now - s.get("ts", 0) > SESSION_TTL]
     for sid in expired:
@@ -19,12 +18,10 @@ def cleanup_sessions() -> None:
 
 
 def escape_markdown(text: str) -> str:
-    """يهرّب الحروف الخاصة لـ Markdown."""
     return re.sub(r"([\_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!])", r"\\\1", text)
 
 
 def detect_platform(text: str) -> tuple[str | None, str | None]:
-    """يكشف المنصة والرابط من النص المُرسَل."""
     if m := YOUTUBE_REGEX.search(text):
         return "youtube", m.group(0)
     if m := TIKTOK_REGEX.search(text):
@@ -37,7 +34,6 @@ def detect_platform(text: str) -> tuple[str | None, str | None]:
 
 
 def format_duration(seconds: int) -> str:
-    """يُنسّق المدة الزمنية إلى نص عربي مقروء."""
     if seconds < 60:
         return f"{seconds}ث"
     m, s = divmod(seconds, 60)
@@ -48,7 +44,6 @@ def format_duration(seconds: int) -> str:
 
 
 def make_ig_cookies_file(sessionid: str = IG_SESSIONID) -> str:
-    """يُنشئ ملف كوكيز مؤقتاً لإنستقرام ويُعيد مساره."""
     content = (
         "# Netscape HTTP Cookie File\n"
         f".instagram.com\tTRUE\t/\tTRUE\t2999999999\tsessionid\t{sessionid}\n"
@@ -61,7 +56,6 @@ def make_ig_cookies_file(sessionid: str = IG_SESSIONID) -> str:
 
 
 async def spinner(msg, stop_event: asyncio.Event) -> None:
-    """يُحدّث نص الرسالة كل 4 ثوانٍ لإظهار أن البوت يعمل."""
     idx = 0
     while not stop_event.is_set():
         await asyncio.sleep(4)
